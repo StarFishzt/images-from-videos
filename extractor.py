@@ -21,8 +21,8 @@ def is_blur_image(image, blur_threshold):
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         l_var = cv2.Laplacian(gray, cv2.CV_64F).var()
         if l_var < blur_threshold:
-            return True
-    return False
+            return l_var, True
+    return 0, False
 
 
 if __name__ == "__main__":
@@ -37,36 +37,52 @@ if __name__ == "__main__":
     parser.add_argument(
         "-o", "--output",
         type=str,
-        help="path to save result images. default is ./results.",
+        help="path to save result images. default is ./results",
         default="./results"
     )
 
     parser.add_argument(
         "-e", "--extension",
         type=str,
-        help="extension of image to save in png or jpg. default is jpg.",
+        help="extension of image to save in png or jpg. default is jpg",
         choices=["jpg", "png"],
         default="jpg"
     )
 
     parser.add_argument(
         "-f", "--flat",
-        help="save all images from all videos in sigle directory <output_dir>/<image> (normally images will be save in <output_dir>/<video_name>/<image>).",
+        help="save all images from all videos in sigle directory <output_dir>/<image> (normally images will be save in <output_dir>/<video_name>/<image>)",
         action="store_true"
     )
 
     parser.add_argument(
         "-r", "--recursive",
-        help="recursively get all videos under given <video_dir>.",
+        help="recursively get all videos under given <video_dir>",
         action="store_true"
     )
 
     parser.add_argument(
-        "-b", "--filter-blur-image",
+        "-fb", "--filter-blur-image",
         nargs="?",
         const=100,
         type=int,
-        help="filter blur image using variance of laplacian (smaller the value, more blurry the image). default=100 if used without value.",
+        help="filter blur image using variance of laplacian (smaller the value, more blurry the image). default is 100 if used without value",
+    )
+
+    parser.add_argument(
+        "-sf", "--skip-frame",
+        nargs="?",
+        const=1,
+        type=int,
+        help="skip saving image from video every N frame(s). default is 1 frame",
+    )
+
+    parser.add_argument(
+        "-st", "--skip-time",
+        nargs="?",
+        const=1000,
+        type=int,
+        help="skip saving image from video every N milisecond. default is 1000 ms (1 sec)",
     )
 
     parser.add_argument(
@@ -77,15 +93,20 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    # Validate
+    if not os.path.isdir(args.video_dir):
+        raise Exception(f"'{args.video_dir}' is not exist as directory")
+
+    if args.skip_time is not None and args.skip_frame is not None:
+        raise Exception(f"You can choose either to skip frame or time, not both")
+
+    # Initialize
+    Path(args.output).mkdir(parents=True, exist_ok=True)
+
     if args.verbose:
         logging.basicConfig(level=logging.INFO, format="%(message)s")
     else:
         logging.basicConfig(level=logging.WARNING, format="%(message)s")
-
-    if not os.path.isdir(args.video_dir):
-        raise Exception(f"'{args.video_dir}' is not exist as directory")
-
-    Path(args.output).mkdir(parents=True, exist_ok=True)
 
     for vid_path in get_videos(args.video_dir, args.recursive):
 
@@ -99,12 +120,22 @@ if __name__ == "__main__":
         frame_count = 0
         try:
             while True:
+
+                if args.skip_time is not None:
+                    cap.set(cv2.CAP_PROP_POS_MSEC, frame_count * args.skip_time) # <- this is very slow
+
                 success, image = cap.read()
                 if not success:
                     break
 
-                if is_blur_image(image, args.filter_blur_image):
-                    logging.info(f"Skip frame {frame_count} since laplacian variance is lower than the threshold [blurry frame]")
+                if args.skip_frame is not None and frame_count % args.skip_frame != 0: 
+                    frame_count+=1
+                    continue
+
+                l_var, is_blur = is_blur_image(image, args.filter_blur_image)
+                if is_blur:
+                    logging.info(f"Skip frame {frame_count} since laplacian variance is lower than the threshold ( {l_var} < {args.filter_blur_image} ) [blurry frame]")
+                    frame_count+=1
                     continue
 
                 vid_name = vid_path.stem
@@ -120,7 +151,9 @@ if __name__ == "__main__":
 
                 cv2.imwrite(save_path, image)
                 logging.info(f"Saved '{save_path}'")
+
                 frame_count+=1
+
         except Exception as e:
             raise e
         finally:
