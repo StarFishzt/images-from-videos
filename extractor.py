@@ -9,6 +9,12 @@ import cv2
 
 def get_videos(root_dir, recursive=False):
     root_dir = Path(root_dir)
+
+    # If root dir is file name just use that file
+    if root_dir.is_file():
+        yield root_dir
+        return
+
     pattern = "**/*" if recursive else "*"
     for path in root_dir.glob(pattern):
         if path.is_file():
@@ -24,6 +30,16 @@ def is_blur_image(image, blur_threshold):
             return l_var, True
     return 0, False
 
+def positive_int_or_none(value):
+    try:
+        val = int(value)
+        if val < 0:
+            raise Exception("Value must be positive integer or zero")
+        return val
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"'{value}' is not a valid integer")
+    except Exception as e:
+        raise e
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Extract images from directory of videos")
@@ -31,7 +47,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "video_dir",
         type=str,
-        help="path to video directory",
+        help="path to video directory or file",
     )
 
     parser.add_argument(
@@ -42,7 +58,7 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        "-e", "--extension",
+        "-ex", "--extension",
         type=str,
         help="extension of image to save in png or jpg. default is jpg",
         choices=["jpg", "png"],
@@ -86,6 +102,24 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
+        "-s", "--start",
+        nargs="?",
+        const=None,
+        type=positive_int_or_none,
+        default=None,
+        help="set start point of the video to extract images in milisecond"
+    )
+
+    parser.add_argument(
+        "-e", "--end",
+        nargs="?",
+        const=None,
+        type=positive_int_or_none,
+        default=None,
+        help="set end point of the video to extract images in milisecond"
+    )
+
+    parser.add_argument(
         "-v", "--verbose",
         help="enable verbose mode",
         action="store_true"
@@ -94,11 +128,14 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Validate
-    if not os.path.isdir(args.video_dir):
-        raise Exception(f"'{args.video_dir}' is not exist as directory")
+    if not (os.path.isdir(args.video_dir) or os.path.isfile(args.video_dir)):
+        raise Exception(f"'{args.video_dir}' is not exist as directory or file")
 
     if args.skip_time is not None and args.skip_frame is not None:
         raise Exception(f"You can choose either to skip frame or time, not both")
+
+    if args.end is not None and args.start is not None and args.end <= args.start:
+        raise Exception(f"End time cannot be less than or equal to start time")
 
     # Initialize
     Path(args.output).mkdir(parents=True, exist_ok=True)
@@ -117,26 +154,50 @@ if __name__ == "__main__":
 
         fps = cap.get(cv2.CAP_PROP_FPS)
         logging.info(f"Process '{str(vid_path)}' | FPS: {fps}")
+        total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+        duration_ms =  (total_frames / fps) * 1000
+        logging.info(f"Total frames: {total_frames} | Duration: {duration_ms} ms")
 
-        frame_count = 0
+        if args.start is not None or args.end is not None:
+
+            if args.start is not None and args.start > duration_ms:
+                raise Exception(f"Start time cannot exceeded the video duration ({duration_ms} ms)")
+
+            if args.end is not None and args.end > duration_ms:
+                raise Exception(f"End time cannot exceeded the video duration ({duration_ms} ms)")
+
+        frame_count = -1
+        last_saved_frame = None
         try:
             while True:
-
-                if args.skip_time is not None:
-                    cap.set(cv2.CAP_PROP_POS_MSEC, frame_count * args.skip_time) # <- this is very slow
+                frame_count+=1
 
                 success, image = cap.read()
                 if not success:
                     break
 
+                current_time_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
+
+                if args.start is not None and current_time_ms < args.start:
+                    continue
+
+                if args.end is not None:
+                    if current_time_ms >= args.end:
+                        break
+
+                if args.skip_time is not None:
+                    if last_saved_frame is not None and (current_time_ms - last_saved_frame) < args.skip_time:
+                        continue
+                    else:
+                        last_saved_frame = current_time_ms
+                    # cap.set(cv2.CAP_PROP_POS_MSEC, (start_frame + frame_count) * args.skip_time) # <- this is very slow
+
                 if args.skip_frame is not None and frame_count % args.skip_frame != 0: 
-                    frame_count+=1
                     continue
 
                 l_var, is_blur = is_blur_image(image, args.filter_blur_image)
                 if is_blur:
                     logging.info(f"Skip frame {frame_count} since laplacian variance is lower than the threshold ( {l_var} < {args.filter_blur_image} ) [blurry frame]")
-                    frame_count+=1
                     continue
 
                 vid_name = vid_path.stem
@@ -153,7 +214,6 @@ if __name__ == "__main__":
                 cv2.imwrite(save_path, image)
                 logging.info(f"Saved '{save_path}'")
 
-                frame_count+=1
 
         except Exception as e:
             raise e
